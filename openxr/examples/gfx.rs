@@ -26,14 +26,15 @@ use openxr as xr;
 
 use gfx_backend_vulkan as back;
 use gfx_hal::{
+    command,
     device::WaitFor,
     format::{Aspects, Format, Swizzle},
     image::{Kind, Layout, SubresourceRange, Usage, ViewCapabilities, ViewKind},
-    pass::{Attachment, AttachmentLoadOp, AttachmentOps, AttachmentStoreOp, Subpass, SubpassDesc},
+    pass, pool,
     prelude::*,
     pso::{
-        EntryPoint, GraphicsPipelineDesc, InputAssemblerDesc, Primitive, PrimitiveAssemblerDesc,
-        Rasterizer,
+        self, EntryPoint, GraphicsPipelineDesc, InputAssemblerDesc, Primitive,
+        PrimitiveAssemblerDesc, Rasterizer,
     },
     RawInstance,
 };
@@ -127,6 +128,7 @@ fn main() {
 
     println!("-> VK_INSTANCE");
     let gfx_instance = if true {
+        // APPROACH NO. 2
         let vk_instance = unsafe {
             xr_instance.create_vulkan_instance(
                 system,
@@ -149,6 +151,7 @@ fn main() {
         let gfx_instance = back::Instance::from_raw(vk_instance).unwrap();
         gfx_instance
     } else {
+        // APPROACH NO. 1
         back::Instance::create("openxrs example", 1).unwrap()
     };
 
@@ -196,13 +199,13 @@ fn main() {
     let mut requested_features = gfx_hal::Features::empty();
     requested_features.insert(gfx_hal::Features::MULTI_VIEWPORTS); // <-- TODO: is this multiview?
 
-    let gfx_gpu = unsafe {
+    let mut gfx_gpu = unsafe {
         gfx_physical_device
             .open(&[(gfx_queue_family, &[1.0])], requested_features)
             .unwrap()
     };
 
-    let gfx_device = &gfx_gpu.device;
+    let gfx_device = &mut gfx_gpu.device;
 
     //     let vk_device = xr_instance
     //         .create_vulkan_device(
@@ -227,10 +230,10 @@ fn main() {
 
     let queue = gfx_gpu
         .queue_groups
-        .first()
+        .first_mut()
         .unwrap()
         .queues
-        .first()
+        .first_mut()
         .unwrap();
     //     let queue = vk_device.get_device_queue(queue_family_index, 0);
 
@@ -239,14 +242,17 @@ fn main() {
     println!("-> RENDER_PASS");
     let render_pass = unsafe {
         gfx_device.create_render_pass(
-            iter::once(Attachment {
+            iter::once(pass::Attachment {
                 format: None, //Some(COLOR_FORMAT),
                 samples: 1,
-                ops: AttachmentOps::new(AttachmentLoadOp::Clear, AttachmentStoreOp::Store),
-                stencil_ops: AttachmentOps::DONT_CARE,
+                ops: pass::AttachmentOps::new(
+                    pass::AttachmentLoadOp::Clear,
+                    pass::AttachmentStoreOp::Store,
+                ),
+                stencil_ops: pass::AttachmentOps::DONT_CARE,
                 layouts: Layout::Undefined..Layout::ColorAttachmentOptimal,
             }),
-            iter::once(SubpassDesc {
+            iter::once(pass::SubpassDesc {
                 // FIXME: .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS) missing
                 colors: &[(0, Layout::ColorAttachmentOptimal)],
                 depth_stencil: None,
@@ -370,7 +376,7 @@ fn main() {
                     specialization: Default::default(),
                 }),
                 &pipeline_layout,
-                Subpass {
+                pass::Subpass {
                     index: 0,
                     main_pass: &render_pass,
                 },
@@ -555,6 +561,16 @@ fn main() {
     //             None,
     //         )
     //         .unwrap();
+
+    println!("-> COMMAND_POOL");
+    let mut cmd_pool = unsafe {
+        gfx_device.create_command_pool(gfx_queue_family.id(), pool::CommandPoolCreateFlags::empty())
+    }
+    .unwrap();
+
+    let mut cmds = Vec::new();
+    unsafe { cmd_pool.allocate(PIPELINE_DEPTH as usize, command::Level::Primary, &mut cmds) };
+
     //     let cmds = vk_device
     //         .allocate_command_buffers(
     //             &vk::CommandBufferAllocateInfo::builder()
@@ -563,8 +579,9 @@ fn main() {
     //         )
     //         .unwrap();
     //
+    println!("-> FENCES");
     let mut fences = (0..PIPELINE_DEPTH)
-        .map(|_| gfx_device.create_fence(true))
+        .map(|_| gfx_device.create_fence(true).unwrap())
         .collect::<Vec<_>>();
 
     //     let fences = (0..PIPELINE_DEPTH)
@@ -585,6 +602,7 @@ fn main() {
     // Index of the current frame, wrapped by PIPELINE_DEPTH. Not to be confused with the
     // swapchain image index.
     let mut frame = 0;
+    println!("-> LOOP");
     'main_loop: loop {
         if !running.load(Ordering::Relaxed) {
             println!("requesting exit");
@@ -799,23 +817,20 @@ fn main() {
         // reading from it.
         swapchain.handle.wait_image(xr::Duration::INFINITE).unwrap();
 
-        unsafe {
-            gfx_device.wait_for_fences(
-                iter::once(fences[frame].as_ref().unwrap()),
-                WaitFor::All,
-                u64::MAX,
-            )
-        }
-        .unwrap();
+        unsafe { gfx_device.wait_for_fences(iter::once(&fences[frame]), WaitFor::All, u64::MAX) }
+            .unwrap();
 
         //         // Ensure the last use of this frame's resources is 100% done
         //         vk_device
         //             .wait_for_fences(&[fences[frame]], true, u64::MAX)
         //             .unwrap();
 
-        unsafe { gfx_device.reset_fence(fences[frame].as_mut().unwrap()) }.unwrap();
+        unsafe { gfx_device.reset_fence(&mut fences[frame]) }.unwrap();
         //         vk_device.reset_fences(&[fences[frame]]).unwrap();
 
+        let cmd = &mut cmds[frame];
+
+        unsafe { cmd.begin_primary(command::CommandBufferFlags::ONE_TIME_SUBMIT) };
         //         let cmd = cmds[frame];
         //         vk_device
         //             .begin_command_buffer(
@@ -824,6 +839,25 @@ fn main() {
         //                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
         //             )
         //             .unwrap();
+
+        let buffer = &swapchain.buffers[image_index as usize];
+        unsafe {
+            cmd.begin_render_pass(
+                &render_pass,
+                &buffer.framebuffer,
+                pso::Rect {
+                    x: 0,
+                    y: 0,
+                    w: swapchain.resolution.width as i16,
+                    h: swapchain.resolution.height as i16,
+                },
+                iter::once(command::RenderAttachmentInfo {
+                    image_view: &buffer.image_view,
+                    clear_value: command::ClearValue::default(),
+                }),
+                command::SubpassContents::Inline,
+            )
+        };
         //         vk_device.cmd_begin_render_pass(
         //             cmd,
         //             &vk::RenderPassBeginInfo::builder()
@@ -841,6 +875,15 @@ fn main() {
         //             vk::SubpassContents::INLINE,
         //         );
 
+        let viewport = pso::Viewport {
+            rect: pso::Rect {
+                x: 0,
+                y: 0,
+                w: swapchain.resolution.width as i16,
+                h: swapchain.resolution.height as i16,
+            },
+            depth: 0.0..1.0,
+        };
         //         let viewports = [vk::Viewport {
         //             x: 0.0,
         //             y: 0.0,
@@ -849,20 +892,35 @@ fn main() {
         //             min_depth: 0.0,
         //             max_depth: 1.0,
         //         }];
+        let scissors = pso::Rect {
+            x: 0,
+            y: 0,
+            w: swapchain.resolution.width as i16,
+            h: swapchain.resolution.height as i16,
+        };
+
         //         let scissors = [vk::Rect2D {
         //             offset: vk::Offset2D { x: 0, y: 0 },
         //             extent: swapchain.resolution,
         //         }];
+
+        unsafe { cmd.set_viewports(0, iter::once(viewport)) };
+        unsafe { cmd.set_scissors(0, iter::once(scissors)) };
         //         vk_device.cmd_set_viewport(cmd, 0, &viewports);
         //         vk_device.cmd_set_scissor(cmd, 0, &scissors);
 
         //         // Draw the scene. Multiview means we only need to do this once, and the GPU will
         //         // automatically broadcast operations to all views. Shaders can use `gl_ViewIndex` to
         //         // e.g. select the correct view matrix.
+        unsafe { cmd.bind_graphics_pipeline(&pipeline) };
         //         vk_device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+        unsafe { cmd.draw(0..3, 0..1) };
         //         vk_device.cmd_draw(cmd, 3, 1, 0, 0);
 
+        unsafe { cmd.end_render_pass() };
         //         vk_device.cmd_end_render_pass(cmd);
+
+        unsafe { cmd.finish() };
         //         vk_device.end_command_buffer(cmd).unwrap();
 
         session.sync_actions(&[(&action_set).into()]).unwrap();
@@ -904,6 +962,14 @@ fn main() {
             .locate_views(VIEW_TYPE, xr_frame_state.predicted_display_time, &stage)
             .unwrap();
 
+        unsafe {
+            queue.submit(
+                iter::once(&cmds[frame]),
+                iter::empty(),
+                iter::empty(),
+                Some(&mut fences[frame]),
+            )
+        };
         //         // Submit commands to the GPU, then tell OpenXR we're done with our part.
         //         vk_device
         //             .queue_submit(
@@ -914,76 +980,83 @@ fn main() {
         //             .unwrap();
         swapchain.handle.release_image().unwrap();
 
-        //         // Tell OpenXR what to present for this frame
-        //         let rect = xr::Rect2Di {
-        //             offset: xr::Offset2Di { x: 0, y: 0 },
-        //             extent: xr::Extent2Di {
-        //                 width: swapchain.resolution.width as _,
-        //                 height: swapchain.resolution.height as _,
-        //             },
-        //         };
-        //         frame_stream
-        //             .end(
-        //                 xr_frame_state.predicted_display_time,
-        //                 environment_blend_mode,
-        //                 &[
-        //                     &xr::CompositionLayerProjection::new().space(&stage).views(&[
-        //                         xr::CompositionLayerProjectionView::new()
-        //                             .pose(views[0].pose)
-        //                             .fov(views[0].fov)
-        //                             .sub_image(
-        //                                 xr::SwapchainSubImage::new()
-        //                                     .swapchain(&swapchain.handle)
-        //                                     .image_array_index(0)
-        //                                     .image_rect(rect),
-        //                             ),
-        //                         xr::CompositionLayerProjectionView::new()
-        //                             .pose(views[1].pose)
-        //                             .fov(views[1].fov)
-        //                             .sub_image(
-        //                                 xr::SwapchainSubImage::new()
-        //                                     .swapchain(&swapchain.handle)
-        //                                     .image_array_index(1)
-        //                                     .image_rect(rect),
-        //                             ),
-        //                     ]),
-        //                 ],
-        //             )
-        //             .unwrap();
+        // Tell OpenXR what to present for this frame
+        let rect = xr::Rect2Di {
+            offset: xr::Offset2Di { x: 0, y: 0 },
+            extent: xr::Extent2Di {
+                width: swapchain.resolution.width as _,
+                height: swapchain.resolution.height as _,
+            },
+        };
+
+        frame_stream
+            .end(
+                xr_frame_state.predicted_display_time,
+                environment_blend_mode,
+                &[
+                    &xr::CompositionLayerProjection::new().space(&stage).views(&[
+                        xr::CompositionLayerProjectionView::new()
+                            .pose(views[0].pose)
+                            .fov(views[0].fov)
+                            .sub_image(
+                                xr::SwapchainSubImage::new()
+                                    .swapchain(&swapchain.handle)
+                                    .image_array_index(0)
+                                    .image_rect(rect),
+                            ),
+                        xr::CompositionLayerProjectionView::new()
+                            .pose(views[1].pose)
+                            .fov(views[1].fov)
+                            .sub_image(
+                                xr::SwapchainSubImage::new()
+                                    .swapchain(&swapchain.handle)
+                                    .image_array_index(1)
+                                    .image_rect(rect),
+                            ),
+                    ]),
+                ],
+            )
+            .unwrap();
+
         frame = (frame + 1) % PIPELINE_DEPTH as usize;
     }
 
-    //     // OpenXR MUST be allowed to clean up before we destroy Vulkan resources it could touch, so
-    //     // first we must drop all its handles.
-    //     drop((
-    //         session,
-    //         frame_wait,
-    //         frame_stream,
-    //         stage,
-    //         action_set,
-    //         left_space,
-    //         right_space,
-    //         left_action,
-    //         right_action,
-    //     ));
+    // OpenXR MUST be allowed to clean up before we destroy Vulkan resources it could touch, so
+    // first we must drop all its handles.
+    drop((
+        session,
+        frame_wait,
+        frame_stream,
+        stage,
+        action_set,
+        left_space,
+        right_space,
+        left_action,
+        right_action,
+    ));
 
-    //     // Ensure all in-flight frames are finished before destroying resources they might use
-    //     vk_device.wait_for_fences(&fences, true, !0).unwrap();
-    //     for fence in fences {
-    //         vk_device.destroy_fence(fence, None);
-    //     }
+    // Ensure all in-flight frames are finished before destroying resources they might use
+    unsafe { gfx_device.wait_for_fences(fences.iter(), WaitFor::All, !0) }.unwrap();
 
-    //     if let Some(swapchain) = swapchain {
-    //         for buffer in swapchain.buffers {
-    //             vk_device.destroy_framebuffer(buffer.framebuffer, None);
-    //             vk_device.destroy_image_view(buffer.color, None);
-    //         }
-    //     }
+    // FIXME: are these destructors really needed?
+    for fence in fences {
+        unsafe { gfx_device.destroy_fence(fence) };
+    }
 
-    //     vk_device.destroy_pipeline(pipeline, None);
-    //     vk_device.destroy_pipeline_layout(pipeline_layout, None);
-    //     vk_device.destroy_command_pool(cmd_pool, None);
-    //     vk_device.destroy_render_pass(render_pass, None);
+    if let Some(swapchain) = swapchain {
+        for buffer in swapchain.buffers {
+            unsafe { gfx_device.destroy_framebuffer(buffer.framebuffer) };
+            unsafe { gfx_device.destroy_image_view(buffer.image_view) };
+        }
+    }
+
+    unsafe {
+        // FIXME
+        //     vk_device.destroy_pipeline(pipeline, None);
+        gfx_device.destroy_pipeline_layout(pipeline_layout);
+        gfx_device.destroy_command_pool(cmd_pool);
+        gfx_device.destroy_render_pass(render_pass);
+    }
     //     vk_device.destroy_device(None);
     //     vk_instance.destroy_instance(None);
     // }
