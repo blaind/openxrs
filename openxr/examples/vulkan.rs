@@ -100,7 +100,7 @@ fn main() {
         );
     }
 
-    let vk_entry = ash::Entry::new().unwrap();
+    let vk_entry = unsafe { ash::Entry::new() }.unwrap();
 
     let vk_app_info = vk::ApplicationInfo::builder()
         .application_version(0)

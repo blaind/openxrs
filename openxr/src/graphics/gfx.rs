@@ -1,7 +1,10 @@
 use std::{marker::PhantomData, ptr};
 
 use crate::Instance;
-use gfx_hal::Backend;
+use gfx_hal::{
+    device::{Device, RawDevice},
+    Backend, Instance as HalInstance, RawInstance,
+};
 use sys::platform::*;
 
 use crate::*;
@@ -48,11 +51,11 @@ impl<B: Backend> Graphics for Gfx<B> {
         let binding = sys::GraphicsBindingVulkanKHR {
             ty: sys::GraphicsBindingVulkanKHR::TYPE,
             next: ptr::null(),
-            instance: info.instance, // FIXME COOP: pub trait Instance<B: Backend> needs a raw getter?
-            physical_device: info.physical_device, // FIXME COOP: pub trait PhysicalDevice<B: Backend> needs a raw getter?
-            device: info.device, // FIXME COOP: pub trait Device<B: Backend> needs a raw getter?
-            queue_family_index: info.queue_family_index, // FIXME TODO
-            queue_index: info.queue_index, // FIXME TODO
+            instance: info.instance.as_raw().as_ptr(),
+            physical_device: info.physical_device,
+            device: info.device.as_ptr(),
+            queue_family_index: 0, // info.queue_family_index, // FIXME TODO
+            queue_index: 0,        // info.queue_index,               // FIXME TODO
         };
         let info = sys::SessionCreateInfo {
             ty: sys::SessionCreateInfo::TYPE,
@@ -100,7 +103,7 @@ pub struct Requirements {
 #[derive(Clone)]
 pub struct SessionCreateInfo<B: Backend> {
     pub instance: B::Instance,
-    pub physical_device: B::PhysicalDevice,
-    pub device: B::Device,
-    pub queue: B::Queue,
+    pub physical_device: VkPhysicalDevice,
+    pub device: B::RawDevice,
+    //pub queue: B::Queue, // FIXME TODO
 }
