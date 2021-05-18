@@ -8,10 +8,7 @@
 use std::{
     io::Cursor,
     iter,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::{atomic, Arc},
     time::Duration,
 };
 
@@ -25,27 +22,15 @@ use libc::c_void;
 use openxr as xr;
 
 use gfx_backend_vulkan as back;
-use gfx_hal::{
-    command,
-    device::WaitFor,
-    format::{Aspects, Format, Swizzle},
-    image::{Kind, Layout, SubresourceRange, Usage, ViewCapabilities, ViewKind},
-    pass, pool,
-    prelude::*,
-    pso::{
-        self, EntryPoint, GraphicsPipelineDesc, InputAssemblerDesc, Primitive,
-        PrimitiveAssemblerDesc, Rasterizer,
-    },
-    RawInstance,
-};
+use gfx_hal::{command, device, format, image, pass, pool, prelude::*, pso, RawInstance};
 
 #[allow(clippy::field_reassign_with_default)] // False positive, might be fixed 1.51
 fn main() {
     // Handle interrupts gracefully
-    let running = Arc::new(AtomicBool::new(true));
+    let running = Arc::new(atomic::AtomicBool::new(true));
     let r = running.clone();
     ctrlc::set_handler(move || {
-        r.store(false, Ordering::Relaxed);
+        r.store(false, atomic::Ordering::Relaxed);
     })
     .expect("setting Ctrl-C handler");
 
@@ -128,7 +113,7 @@ fn main() {
 
     println!("-> VK_INSTANCE");
     let gfx_instance = if true {
-        // APPROACH NO. 2
+        // APPROACH NO. 2 -- most probably need to use this as per openxr docs
         let vk_instance = unsafe {
             xr_instance.create_vulkan_instance(
                 system,
@@ -156,13 +141,14 @@ fn main() {
     };
 
     let gfx_adapters = gfx_instance.enumerate_adapters();
-    let gfx_adapter = gfx_adapters.first().unwrap();
-    let gfx_physical_device = &gfx_adapter.physical_device;
+    let FIXME_gfx_adapter = gfx_adapters.first().unwrap();
+    let gfx_physical_device = &FIXME_gfx_adapter.physical_device;
 
     println!("-> VK_PHYSICAL_DEVICE {:p}", unsafe {
         gfx_instance.as_raw().as_ptr()
     },);
 
+    //// FIXME <--- gfx_adapter instead of vk_physical_device !
     let vk_physical_device = vk::PhysicalDevice::from_raw(
         xr_instance
             .vulkan_graphics_device(system, unsafe { gfx_instance.as_raw().as_ptr() } as _)
@@ -170,14 +156,14 @@ fn main() {
             .unwrap() as _,
     );
 
-    let gfx_device_properties = gfx_adapter.physical_device.properties();
+    let gfx_device_properties = FIXME_gfx_adapter.physical_device.properties();
     //     let vk_device_properties = vk_instance.get_physical_device_properties(vk_physical_device);
     //     if vk_device_properties.api_version < vk_target_version {
     //         vk_instance.destroy_instance(None);
     //         panic!("Vulkan phyiscal device doesn't support version 1.1");
     //     }
 
-    let gfx_queue_family = gfx_adapter
+    let gfx_queue_family = FIXME_gfx_adapter
         .queue_families
         .iter()
         .find(|info| info.queue_type().supports_graphics())
@@ -196,12 +182,12 @@ fn main() {
     //         })
     //         .expect("Vulkan device has no graphics queue");
 
-    let mut requested_features = gfx_hal::Features::empty();
-    requested_features.insert(gfx_hal::Features::MULTI_VIEWPORTS); // <-- TODO: is this multiview?
+    let mut gfx_requested_features = gfx_hal::Features::empty();
+    gfx_requested_features.insert(gfx_hal::Features::MULTI_VIEWPORTS); // <-- TODO: is this multiview?
 
     let mut gfx_gpu = unsafe {
         gfx_physical_device
-            .open(&[(gfx_queue_family, &[1.0])], requested_features)
+            .open(&[(gfx_queue_family, &[1.0])], gfx_requested_features)
             .unwrap()
     };
 
@@ -228,19 +214,25 @@ fn main() {
     //     let vk_device =
     //         ash::Device::load(vk_instance.fp_v1_0(), vk::Device::from_raw(vk_device as _));
 
-    let queue = gfx_gpu
+    let (gfx_queue_id, gfx_queue) = gfx_gpu
         .queue_groups
-        .first_mut()
-        .unwrap()
-        .queues
-        .first_mut()
+        .iter_mut()
+        .enumerate()
+        .find_map(|(idx, qq)| {
+            if qq.family == gfx_queue_family.id() {
+                Some((idx, qq.queues.first_mut().unwrap()))
+            } else {
+                None
+            }
+        })
         .unwrap();
+    // FIXME: get queue by queue family index
     //     let queue = vk_device.get_device_queue(queue_family_index, 0);
 
     let view_mask = !(!0 << VIEW_COUNT);
 
     println!("-> RENDER_PASS");
-    let render_pass = unsafe {
+    let gfx_render_pass = unsafe {
         gfx_device.create_render_pass(
             iter::once(pass::Attachment {
                 format: None, //Some(COLOR_FORMAT),
@@ -250,11 +242,11 @@ fn main() {
                     pass::AttachmentStoreOp::Store,
                 ),
                 stencil_ops: pass::AttachmentOps::DONT_CARE,
-                layouts: Layout::Undefined..Layout::ColorAttachmentOptimal,
+                layouts: image::Layout::Undefined..image::Layout::ColorAttachmentOptimal,
             }),
             iter::once(pass::SubpassDesc {
                 // FIXME: .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS) missing
-                colors: &[(0, Layout::ColorAttachmentOptimal)],
+                colors: &[(0, image::Layout::ColorAttachmentOptimal)],
                 depth_stencil: None,
                 inputs: &[],
                 resolves: &[],
@@ -265,7 +257,7 @@ fn main() {
                            SubpassDependency {
                                passes: None..None,
                                stages: ,
-                               accesses: gfx_hal::image::Access::empty()..gfx_hal::image::Access::empty(),
+                               accesses: image::Access::empty()..image::Access::empty(),
                                flags: Dependencies::empty(), // FIXME
                            } */
                            //FIXME: push multiview
@@ -315,17 +307,17 @@ fn main() {
     ))
     .unwrap();
 
-    let vert = unsafe { gfx_device.create_shader_module(&vert) }.unwrap();
+    let gfx_vert = unsafe { gfx_device.create_shader_module(&vert) }.unwrap();
     //     let vert = vk_device
     //         .create_shader_module(&vk::ShaderModuleCreateInfo::builder().code(&vert), None)
     //         .unwrap();
 
-    let frag = unsafe { gfx_device.create_shader_module(&frag) }.unwrap();
+    let gfx_frag = unsafe { gfx_device.create_shader_module(&frag) }.unwrap();
     //     let frag = vk_device
     //         .create_shader_module(&vk::ShaderModuleCreateInfo::builder().code(&frag), None)
     //         .unwrap();
 
-    let pipeline_layout =
+    let gfx_pipeline_layout =
         unsafe { gfx_device.create_pipeline_layout(iter::empty(), iter::empty()) }.unwrap();
 
     //     let pipeline_layout = vk_device
@@ -349,36 +341,36 @@ fn main() {
     //     };
 
     println!("-> PIPELINE");
-    let pipeline = unsafe {
+    let gfx_pipeline = unsafe {
         gfx_device.create_graphics_pipeline(
             // FIXME: viewport_state ? rasterization_state ? multisample_state? depth_stencil?
-            &GraphicsPipelineDesc::new(
-                PrimitiveAssemblerDesc::Vertex {
+            &pso::GraphicsPipelineDesc::new(
+                pso::PrimitiveAssemblerDesc::Vertex {
                     buffers: &vec![],
                     attributes: &vec![],
-                    input_assembler: InputAssemblerDesc {
-                        primitive: Primitive::TriangleList,
+                    input_assembler: pso::InputAssemblerDesc {
+                        primitive: pso::Primitive::TriangleList,
                         with_adjacency: false,
                         restart_index: None,
                     },
-                    vertex: EntryPoint {
+                    vertex: pso::EntryPoint {
                         entry: "main",
-                        module: &vert,
+                        module: &gfx_vert,
                         specialization: Default::default(),
                     },
                     geometry: None,
                     tessellation: None,
                 },
-                Rasterizer::FILL,
-                Some(EntryPoint {
+                pso::Rasterizer::FILL,
+                Some(pso::EntryPoint {
                     entry: "main",
-                    module: &frag,
+                    module: &gfx_frag,
                     specialization: Default::default(),
                 }),
-                &pipeline_layout,
+                &gfx_pipeline_layout,
                 pass::Subpass {
                     index: 0,
-                    main_pass: &render_pass,
+                    main_pass: &gfx_render_pass,
                 },
             ),
             None,
@@ -459,21 +451,22 @@ fn main() {
     //         )
     //         .unwrap()[0];
 
-    unsafe { gfx_device.destroy_shader_module(vert) };
+    unsafe { gfx_device.destroy_shader_module(gfx_vert) };
     //     vk_device.destroy_shader_module(vert, None);
 
-    unsafe { gfx_device.destroy_shader_module(frag) };
+    unsafe { gfx_device.destroy_shader_module(gfx_frag) };
     //     vk_device.destroy_shader_module(frag, None);
 
     println!("-> SESSION");
-    let (session, mut frame_wait, mut frame_stream) = unsafe {
+    let (gfx_session, mut xr_frame_wait, mut xr_frame_stream) = unsafe {
         xr_instance.create_session::<xr::Gfx<gfx_backend_vulkan::Backend>>(
             system,
             &xr::gfx::SessionCreateInfo {
                 instance: gfx_instance,
                 physical_device: vk_physical_device.as_raw() as _,
                 device: gfx_device.as_raw(),
-                //queue: &*queue,
+                queue_family: gfx_queue_family.id(),
+                queue_id: gfx_queue_id as u32,
             },
         )
     }
@@ -533,20 +526,20 @@ fn main() {
         .unwrap();
 
     // Attach the action set to the session
-    session.attach_action_sets(&[&action_set]).unwrap();
+    gfx_session.attach_action_sets(&[&action_set]).unwrap();
 
     // Create an action space for each device we want to locate
     let right_space = right_action
-        .create_space(session.clone(), xr::Path::NULL, xr::Posef::IDENTITY)
+        .create_space(gfx_session.clone(), xr::Path::NULL, xr::Posef::IDENTITY)
         .unwrap();
     let left_space = left_action
-        .create_space(session.clone(), xr::Path::NULL, xr::Posef::IDENTITY)
+        .create_space(gfx_session.clone(), xr::Path::NULL, xr::Posef::IDENTITY)
         .unwrap();
 
     // OpenXR uses a couple different types of reference frames for positioning content; we need
     // to choose one for displaying our content! STAGE would be relative to the center of your
     // guardian system's bounds, and LOCAL would be relative to your device's starting location.
-    let stage = session
+    let stage = gfx_session
         .create_reference_space(xr::ReferenceSpaceType::STAGE, xr::Posef::IDENTITY)
         .unwrap();
 
@@ -604,12 +597,12 @@ fn main() {
     let mut frame = 0;
     println!("-> LOOP");
     'main_loop: loop {
-        if !running.load(Ordering::Relaxed) {
+        if !running.load(atomic::Ordering::Relaxed) {
             println!("requesting exit");
             // The OpenXR runtime may want to perform a smooth transition between scenes, so we
             // can't necessarily exit instantly. Instead, we must notify the runtime of our
             // intent and wait for it to tell us when we're actually done.
-            match session.request_exit() {
+            match gfx_session.request_exit() {
                 Ok(()) => {}
                 Err(xr::sys::Result::ERROR_SESSION_NOT_RUNNING) => break,
                 Err(e) => panic!("{}", e),
@@ -625,11 +618,11 @@ fn main() {
                     println!("entered state {:?}", e.state());
                     match e.state() {
                         xr::SessionState::READY => {
-                            session.begin(VIEW_TYPE).unwrap();
+                            gfx_session.begin(VIEW_TYPE).unwrap();
                             session_running = true;
                         }
                         xr::SessionState::STOPPING => {
-                            session.end().unwrap();
+                            gfx_session.end().unwrap();
                             session_running = false;
                         }
                         xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => {
@@ -657,12 +650,12 @@ fn main() {
         // Block until the previous frame is finished displaying, and is ready for another one.
         // Also returns a prediction of when the next frame will be displayed, for use with
         // predicting locations of controllers, viewpoints, etc.
-        let xr_frame_state = frame_wait.wait().unwrap();
+        let xr_frame_state = xr_frame_wait.wait().unwrap();
         // Must be called before any rendering is done!
-        frame_stream.begin().unwrap();
+        xr_frame_stream.begin().unwrap();
 
         if !xr_frame_state.should_render {
-            frame_stream
+            xr_frame_stream
                 .end(
                     xr_frame_state.predicted_display_time,
                     environment_blend_mode,
@@ -696,7 +689,7 @@ fn main() {
             let format = vk::Format::from_raw(COLOR_FORMAT as i32);
             assert_eq!(format, vk::Format::B8G8R8A8_SRGB);
 
-            let handle = session
+            let handle = gfx_session
                 .create_swapchain(&xr::SwapchainCreateInfo {
                     create_flags: xr::SwapchainCreateFlags::EMPTY,
                     usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT
@@ -726,19 +719,19 @@ fn main() {
                         //gfx_device.create_image(kind, mip_levels, format, tiling, usage, sparse, view_caps)
                         let image = back::Image::from_raw(
                             vk::Image::from_raw(color_image).as_raw() as *const c_void,
-                            Kind::D2(1, 1, 1, 0),
-                            ViewCapabilities::default(),
+                            image::Kind::D2(1, 1, 1, 0),
+                            image::ViewCapabilities::default(),
                         );
 
                         let image_view = unsafe {
                             gfx_device.create_image_view(
                                 &image,
-                                ViewKind::D2Array,
+                                image::ViewKind::D2Array,
                                 COLOR_FORMAT,
-                                Swizzle::default(),
-                                Usage::empty(),
-                                SubresourceRange {
-                                    aspects: Aspects::COLOR,
+                                format::Swizzle::default(),
+                                image::Usage::empty(),
+                                image::SubresourceRange {
+                                    aspects: format::Aspects::COLOR,
                                     level_start: 0,
                                     level_count: Some(1),
                                     layer_start: 0,
@@ -769,13 +762,13 @@ fn main() {
 
                         let framebuffer = unsafe {
                             gfx_device.create_framebuffer(
-                                &render_pass,
-                                iter::once(gfx_hal::image::FramebufferAttachment {
-                                    usage: gfx_hal::image::Usage::empty(),
-                                    view_caps: gfx_hal::image::ViewCapabilities::empty(),
+                                &gfx_render_pass,
+                                iter::once(image::FramebufferAttachment {
+                                    usage: image::Usage::empty(),
+                                    view_caps: image::ViewCapabilities::empty(),
                                     format: COLOR_FORMAT,
                                 }),
-                                gfx_hal::image::Extent {
+                                image::Extent {
                                     width: resolution.width,
                                     height: resolution.height,
                                     depth: 1,
@@ -817,8 +810,10 @@ fn main() {
         // reading from it.
         swapchain.handle.wait_image(xr::Duration::INFINITE).unwrap();
 
-        unsafe { gfx_device.wait_for_fences(iter::once(&fences[frame]), WaitFor::All, u64::MAX) }
-            .unwrap();
+        unsafe {
+            gfx_device.wait_for_fences(iter::once(&fences[frame]), device::WaitFor::All, u64::MAX)
+        }
+        .unwrap();
 
         //         // Ensure the last use of this frame's resources is 100% done
         //         vk_device
@@ -843,7 +838,7 @@ fn main() {
         let buffer = &swapchain.buffers[image_index as usize];
         unsafe {
             cmd.begin_render_pass(
-                &render_pass,
+                &gfx_render_pass,
                 &buffer.framebuffer,
                 pso::Rect {
                     x: 0,
@@ -912,7 +907,7 @@ fn main() {
         //         // Draw the scene. Multiview means we only need to do this once, and the GPU will
         //         // automatically broadcast operations to all views. Shaders can use `gl_ViewIndex` to
         //         // e.g. select the correct view matrix.
-        unsafe { cmd.bind_graphics_pipeline(&pipeline) };
+        unsafe { cmd.bind_graphics_pipeline(&gfx_pipeline) };
         //         vk_device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
         unsafe { cmd.draw(0..3, 0..1) };
         //         vk_device.cmd_draw(cmd, 3, 1, 0, 0);
@@ -923,7 +918,7 @@ fn main() {
         unsafe { cmd.finish() };
         //         vk_device.end_command_buffer(cmd).unwrap();
 
-        session.sync_actions(&[(&action_set).into()]).unwrap();
+        gfx_session.sync_actions(&[(&action_set).into()]).unwrap();
 
         // Find where our controllers are located in the Stage space
         let right_location = right_space
@@ -934,7 +929,7 @@ fn main() {
             .locate(&stage, xr_frame_state.predicted_display_time)
             .unwrap();
 
-        if left_action.is_active(&session, xr::Path::NULL).unwrap() {
+        if left_action.is_active(&gfx_session, xr::Path::NULL).unwrap() {
             print!(
                 "Left Hand: ({:0<12},{:0<12},{:0<12}), ",
                 left_location.pose.position.x,
@@ -943,7 +938,10 @@ fn main() {
             );
         }
 
-        if right_action.is_active(&session, xr::Path::NULL).unwrap() {
+        if right_action
+            .is_active(&gfx_session, xr::Path::NULL)
+            .unwrap()
+        {
             print!(
                 "Right Hand: ({:0<12},{:0<12},{:0<12})",
                 right_location.pose.position.x,
@@ -958,12 +956,12 @@ fn main() {
         // rendering begins in earnest on the GPU. Uniforms dependent on this data can be sent
         // to the GPU just-in-time by writing them to per-frame host-visible memory which the
         // GPU will only read once the command buffer is submitted.
-        let (_, views) = session
+        let (_, views) = gfx_session
             .locate_views(VIEW_TYPE, xr_frame_state.predicted_display_time, &stage)
             .unwrap();
 
         unsafe {
-            queue.submit(
+            gfx_queue.submit(
                 iter::once(&cmds[frame]),
                 iter::empty(),
                 iter::empty(),
@@ -989,7 +987,7 @@ fn main() {
             },
         };
 
-        frame_stream
+        xr_frame_stream
             .end(
                 xr_frame_state.predicted_display_time,
                 environment_blend_mode,
@@ -1024,9 +1022,9 @@ fn main() {
     // OpenXR MUST be allowed to clean up before we destroy Vulkan resources it could touch, so
     // first we must drop all its handles.
     drop((
-        session,
-        frame_wait,
-        frame_stream,
+        gfx_session,
+        xr_frame_wait,
+        xr_frame_stream,
         stage,
         action_set,
         left_space,
@@ -1036,7 +1034,7 @@ fn main() {
     ));
 
     // Ensure all in-flight frames are finished before destroying resources they might use
-    unsafe { gfx_device.wait_for_fences(fences.iter(), WaitFor::All, !0) }.unwrap();
+    unsafe { gfx_device.wait_for_fences(fences.iter(), device::WaitFor::All, !0) }.unwrap();
 
     // FIXME: are these destructors really needed?
     for fence in fences {
@@ -1053,9 +1051,9 @@ fn main() {
     unsafe {
         // FIXME
         //     vk_device.destroy_pipeline(pipeline, None);
-        gfx_device.destroy_pipeline_layout(pipeline_layout);
+        gfx_device.destroy_pipeline_layout(gfx_pipeline_layout);
         gfx_device.destroy_command_pool(cmd_pool);
-        gfx_device.destroy_render_pass(render_pass);
+        gfx_device.destroy_render_pass(gfx_render_pass);
     }
     //     vk_device.destroy_device(None);
     //     vk_instance.destroy_instance(None);
@@ -1065,7 +1063,7 @@ fn main() {
 }
 
 // FIXME ok?
-pub const COLOR_FORMAT: Format = Format::Bgra8Srgb;
+pub const COLOR_FORMAT: format::Format = format::Format::Bgra8Srgb;
 // pub const COLOR_FORMAT: vk::Format = vk::Format::B8G8R8A8_SRGB;
 
 pub const VIEW_COUNT: u32 = 2;

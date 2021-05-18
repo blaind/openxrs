@@ -3,7 +3,8 @@ use std::{marker::PhantomData, ptr};
 use crate::Instance;
 use gfx_hal::{
     device::{Device, RawDevice},
-    Backend, Instance as HalInstance, RawInstance,
+    prelude::QueueFamily,
+    queue, Backend, Instance as HalInstance, RawInstance,
 };
 use sys::platform::*;
 
@@ -54,8 +55,8 @@ impl<B: Backend> Graphics for Gfx<B> {
             instance: info.instance.as_raw().as_ptr(),
             physical_device: info.physical_device,
             device: info.device.as_ptr(),
-            queue_family_index: 0, // info.queue_family_index, // FIXME TODO
-            queue_index: 0,        // info.queue_index,               // FIXME TODO
+            queue_family_index: info.queue_family.0 as u32,
+            queue_index: info.queue_id,
         };
         let info = sys::SessionCreateInfo {
             ty: sys::SessionCreateInfo::TYPE,
@@ -105,5 +106,6 @@ pub struct SessionCreateInfo<B: Backend> {
     pub instance: B::Instance,
     pub physical_device: VkPhysicalDevice,
     pub device: B::RawDevice,
-    //pub queue: B::Queue, // FIXME TODO
+    pub queue_family: queue::QueueFamilyId,
+    pub queue_id: u32,
 }
