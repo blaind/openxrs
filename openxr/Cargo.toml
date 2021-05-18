@@ -26,8 +26,10 @@ libc = "0.2.50"
 libloading = { version = "0.7", optional = true }
 
 [dev-dependencies]
-ash = "0.31"
+ash = "0.32"
 ctrlc = "3.1.5"
+gfx-hal = { path = "../../gfx/src/hal" }
+gfx-backend-vulkan = { path = "../../gfx/src/backend/vulkan" }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["profileapi"] }

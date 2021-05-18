@@ -19,6 +19,7 @@ use ash::{
     version::{DeviceV1_0, EntryV1_0, InstanceV1_0},
     vk::{self, Handle},
 };
+use gfx_backend_vulkan as back;
 use openxr as xr;
 
 #[allow(clippy::field_reassign_with_default)] // False positive, might be fixed 1.51
@@ -108,12 +109,21 @@ fn main() {
         .api_version(vk_target_version);
 
     unsafe {
+        let extensions =
+            back::Instance::required_extensions(&vk_entry, vk_target_version.into()).unwrap();
+        let extensions_ptrs = extensions.iter().map(|&s| s.as_ptr()).collect::<Vec<_>>();
+
+        let layers = back::Instance::required_layers(&vk_entry).unwrap();
+        let layers_ptrs = layers.iter().map(|&s| s.as_ptr()).collect::<Vec<_>>();
+
         let vk_instance = xr_instance
             .create_vulkan_instance(
                 system,
                 std::mem::transmute(vk_entry.static_fn().get_instance_proc_addr),
-                &vk::InstanceCreateInfo::builder().application_info(&vk_app_info) as *const _
-                    as *const _,
+                &vk::InstanceCreateInfo::builder()
+                    .application_info(&vk_app_info)
+                    .enabled_extension_names(&extensions_ptrs)
+                    .enabled_layer_names(&layers_ptrs) as *const _ as *const _,
             )
             .expect("XR error creating Vulkan instance")
             .map_err(vk::Result::from_raw)
@@ -123,11 +133,21 @@ fn main() {
             vk::Instance::from_raw(vk_instance as _),
         );
 
+        let gfx_instance = back::Instance::from_raw(
+            vk_entry.clone(),
+            vk_instance.clone(),
+            vk_target_version.into(),
+            extensions,
+        )
+        .unwrap();
+
         let vk_physical_device = vk::PhysicalDevice::from_raw(
             xr_instance
                 .vulkan_graphics_device(system, vk_instance.handle().as_raw() as _)
                 .unwrap() as _,
         );
+
+        let gfx_physical_device = back::PhysicalDevice::from_raw(&gfx_instance, vk_physical_device);
 
         let vk_device_properties = vk_instance.get_physical_device_properties(vk_physical_device);
         if vk_device_properties.api_version < vk_target_version {
