@@ -191,14 +191,14 @@ fn main() {
         gfx_adapter
             .physical_device
             .gpu_from_raw(
-                vk_device,
+                vk_device.clone(),
                 &[(queue_family, &[1.0])],
                 gfx_hal::Features::empty(), // add multiview when supported
             )
             .unwrap()
     };
 
-    let queue = &gpu.queue_groups.pop().unwrap().queues[0];
+    let queue = &mut gpu.queue_groups.pop().unwrap().queues[0];
 
     let render_pass = unsafe {
         gpu.device
@@ -387,7 +387,7 @@ fn main() {
         .create_reference_space(xr::ReferenceSpaceType::STAGE, xr::Posef::IDENTITY)
         .unwrap();
 
-    let cmd_pool = unsafe {
+    let mut cmd_pool = unsafe {
         gpu.device
             .create_command_pool(
                 queue_family.id(),
@@ -398,7 +398,7 @@ fn main() {
     };
     let mut cmds = vec![];
     unsafe { cmd_pool.allocate(PIPELINE_DEPTH, command::Level::Primary, &mut cmds) };
-    let fences = (0..PIPELINE_DEPTH)
+    let mut fences = (0..PIPELINE_DEPTH)
         .map(|_| gpu.device.create_fence(true).unwrap())
         .collect::<Vec<_>>();
 
@@ -488,7 +488,7 @@ fn main() {
             let views = xr_instance
                 .enumerate_view_configuration_views(system, VIEW_TYPE)
                 .unwrap();
-            assert_eq!(views.len(), VIEW_COUNT as usize);
+            assert_eq!(views.len(), 2);
             assert_eq!(views[0], views[1]);
 
             // Create a swapchain for the viewpoints! A swapchain is a set of texture buffers
@@ -503,7 +503,7 @@ fn main() {
                     create_flags: xr::SwapchainCreateFlags::EMPTY,
                     usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT
                         | xr::SwapchainUsageFlags::SAMPLED,
-                    format: COLOR_FORMAT.as_raw() as _,
+                    format: VK_COLOR_FORMAT.as_raw() as _,
                     // The Vulkan graphics pipeline we create is not set up for multisampling,
                     // so we hardcode this to 1. If we used a proper multisampling setup, we
                     // could set this to `views[0].recommended_swapchain_sample_count`.
@@ -511,7 +511,7 @@ fn main() {
                     width: resolution.width,
                     height: resolution.height,
                     face_count: 1,
-                    array_size: VIEW_COUNT,
+                    array_size: 1,
                     mip_count: 1,
                 })
                 .unwrap();
@@ -526,33 +526,41 @@ fn main() {
                     .into_iter()
                     .map(|color_image| {
                         let color_image = vk::Image::from_raw(color_image);
-                        let color = vk_device
-                            .create_image_view(
-                                &vk::ImageViewCreateInfo::builder()
-                                    .image(color_image)
-                                    .view_type(vk::ImageViewType::TYPE_2D_ARRAY)
-                                    .format(COLOR_FORMAT)
-                                    .subresource_range(vk::ImageSubresourceRange {
-                                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                                        base_mip_level: 0,
-                                        level_count: 1,
-                                        base_array_layer: 0,
-                                        layer_count: VIEW_COUNT,
+                        let color = unsafe {
+                            gpu.device
+                                .image_view_from_raw(
+                                    color_image,
+                                    vk::ImageViewType::TYPE_2D_ARRAY,
+                                    COLOR_FORMAT,
+                                    format::Swizzle::NO,
+                                    image::Usage::COLOR_ATTACHMENT | image::Usage::SAMPLED,
+                                    image::SubresourceRange {
+                                        aspects: format::Aspects::COLOR,
+                                        level_start: 0,
+                                        level_count: Some(1),
+                                        layer_start: 0,
+                                        layer_count: Some(1),
+                                    },
+                                )
+                                .unwrap()
+                        };
+                        let framebuffer = unsafe {
+                            gpu.device
+                                .create_framebuffer(
+                                    &render_pass,
+                                    iter::once(image::FramebufferAttachment {
+                                        usage: image::Usage::COLOR_ATTACHMENT,
+                                        view_caps: image::ViewCapabilities::empty(),
+                                        format: COLOR_FORMAT,
                                     }),
-                                None,
-                            )
-                            .unwrap();
-                        let framebuffer = vk_device
-                            .create_framebuffer(
-                                &vk::FramebufferCreateInfo::builder()
-                                    .render_pass(render_pass)
-                                    .width(resolution.width)
-                                    .height(resolution.height)
-                                    .attachments(&[color])
-                                    .layers(1), // Multiview handles addressing multiple layers
-                                None,
-                            )
-                            .unwrap();
+                                    image::Extent {
+                                        width: resolution.width,
+                                        height: resolution.height,
+                                        depth: 1,
+                                    },
+                                )
+                                .unwrap()
+                        };
                         Framebuffer { framebuffer, color }
                     })
                     .collect(),
@@ -567,60 +575,66 @@ fn main() {
         // reading from it.
         swapchain.handle.wait_image(xr::Duration::INFINITE).unwrap();
 
-        // Ensure the last use of this frame's resources is 100% done
-        vk_device
-            .wait_for_fences(&[fences[frame]], true, u64::MAX)
-            .unwrap();
-        vk_device.reset_fences(&[fences[frame]]).unwrap();
+        let cmd = &mut cmds[frame];
+        let fence = &mut fences[image_index as usize];
+        let buffer = &swapchain.buffers[image_index as usize];
+        unsafe {
+            // Ensure the last use of this frame's resources is 100% done
+            gpu.device.wait_for_fence(fence, u64::MAX).unwrap();
+            gpu.device.reset_fence(fence).unwrap();
 
-        let cmd = cmds[frame];
-        vk_device
-            .begin_command_buffer(
-                cmd,
-                &vk::CommandBufferBeginInfo::builder()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )
-            .unwrap();
-        vk_device.cmd_begin_render_pass(
-            cmd,
-            &vk::RenderPassBeginInfo::builder()
-                .render_pass(render_pass)
-                .framebuffer(swapchain.buffers[image_index as usize].framebuffer)
-                .render_area(vk::Rect2D {
-                    offset: vk::Offset2D::default(),
-                    extent: swapchain.resolution,
-                })
-                .clear_values(&[vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: [0.0, 0.0, 0.0, 1.0],
+            cmd.begin_primary(command::CommandBufferFlags::ONE_TIME_SUBMIT);
+            cmd.begin_render_pass(
+                &render_pass,
+                &buffer.framebuffer,
+                pso::Rect {
+                    x: 0,
+                    y: 0,
+                    w: swapchain.resolution.width as i16,
+                    h: swapchain.resolution.height as i16,
+                },
+                iter::once(command::RenderAttachmentInfo {
+                    image_view: &buffer.color,
+                    clear_value: command::ClearValue {
+                        color: command::ClearColor {
+                            float32: [0.0, 0.0, 0.0, 1.0],
+                        },
                     },
-                }]),
-            vk::SubpassContents::INLINE,
-        );
+                }),
+                command::SubpassContents::Inline,
+            );
+        }
 
-        let viewports = [vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: swapchain.resolution.width as f32,
-            height: swapchain.resolution.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        }];
-        let scissors = [vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: swapchain.resolution,
-        }];
-        vk_device.cmd_set_viewport(cmd, 0, &viewports);
-        vk_device.cmd_set_scissor(cmd, 0, &scissors);
+        let viewports = iter::once(pso::Viewport {
+            rect: pso::Rect {
+                x: 0,
+                y: 0,
+                w: swapchain.resolution.width as i16,
+                h: swapchain.resolution.height as i16,
+            },
+            depth: 0.0..1.0,
+        });
+        let scissors = iter::once(pso::Rect {
+            x: 0,
+            y: 0,
+            w: swapchain.resolution.width as i16,
+            h: swapchain.resolution.height as i16,
+        });
+        unsafe {
+            cmd.set_viewports(0, viewports);
+            cmd.set_scissors(0, scissors);
+        }
 
         // Draw the scene. Multiview means we only need to do this once, and the GPU will
         // automatically broadcast operations to all views. Shaders can use `gl_ViewIndex` to
         // e.g. select the correct view matrix.
-        vk_device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-        vk_device.cmd_draw(cmd, 3, 1, 0, 0);
+        unsafe {
+            cmd.bind_graphics_pipeline(&pipeline);
+            cmd.draw(0..3, 0..1);
 
-        vk_device.cmd_end_render_pass(cmd);
-        vk_device.end_command_buffer(cmd).unwrap();
+            cmd.end_render_pass();
+            cmd.finish();
+        }
 
         session.sync_actions(&[(&action_set).into()]).unwrap();
 
@@ -662,13 +676,9 @@ fn main() {
             .unwrap();
 
         // Submit commands to the GPU, then tell OpenXR we're done with our part.
-        vk_device
-            .queue_submit(
-                queue,
-                &[vk::SubmitInfo::builder().command_buffers(&[cmd]).build()],
-                fences[frame],
-            )
-            .unwrap();
+        unsafe {
+            queue.submit(iter::once(&*cmd), iter::empty(), iter::empty(), Some(fence));
+        }
         swapchain.handle.release_image().unwrap();
 
         // Tell OpenXR what to present for this frame
@@ -700,7 +710,7 @@ fn main() {
                             .sub_image(
                                 xr::SwapchainSubImage::new()
                                     .swapchain(&swapchain.handle)
-                                    .image_array_index(1)
+                                    .image_array_index(0)
                                     .image_rect(rect),
                             ),
                     ]),
@@ -735,8 +745,8 @@ fn main() {
 
         if let Some(swapchain) = swapchain {
             for buffer in swapchain.buffers {
-                vk_device.destroy_framebuffer(buffer.framebuffer, None);
-                vk_device.destroy_image_view(buffer.color, None);
+                gpu.device.destroy_framebuffer(buffer.framebuffer);
+                gpu.device.destroy_image_view(buffer.color);
             }
         }
 
@@ -756,7 +766,7 @@ fn main() {
 }
 
 pub const COLOR_FORMAT: format::Format = format::Format::Bgra8Srgb;
-pub const VIEW_COUNT: u32 = 2;
+pub const VK_COLOR_FORMAT: vk::Format = vk::Format::B8G8R8A8_SRGB;
 const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 
 struct Swapchain {
@@ -766,8 +776,8 @@ struct Swapchain {
 }
 
 struct Framebuffer {
-    framebuffer: vk::Framebuffer,
-    color: vk::ImageView,
+    framebuffer: <back::Backend as gfx_hal::Backend>::Framebuffer,
+    color: <back::Backend as gfx_hal::Backend>::ImageView,
 }
 
 /// Maximum number of frames in flight
