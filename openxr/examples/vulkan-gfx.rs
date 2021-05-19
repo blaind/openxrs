@@ -134,6 +134,8 @@ fn main() {
             vk::Instance::from_raw(vk_instance as _),
         )
     };
+    let vk_instance =
+        drop_guard::DropGuard::new(vk_instance, |inst| unsafe { inst.destroy_instance(None) });
 
     let gfx_instance = unsafe {
         back::Instance::from_raw(
@@ -185,6 +187,8 @@ fn main() {
             .expect("Vulkan error creating Vulkan device");
         ash::Device::load(vk_instance.fp_v1_0(), vk::Device::from_raw(vk_device as _))
     };
+    let vk_device =
+        drop_guard::DropGuard::new(vk_device, |dev| unsafe { dev.destroy_device(None) });
 
     // the arguments should mirror the ones for the creation of vk_device
     let mut gpu = unsafe {
@@ -750,16 +754,10 @@ fn main() {
             }
         }
 
-        vk_device.destroy_pipeline(pipeline.0, None);
+        // vk_device.destroy_pipeline(pipeline.0, None);
         gpu.device.destroy_pipeline_layout(pipeline_layout);
         gpu.device.destroy_command_pool(cmd_pool);
         gpu.device.destroy_render_pass(render_pass);
-
-        drop(gpu.device);
-        vk_device.destroy_device(None);
-
-        drop(gfx_instance);
-        vk_instance.destroy_instance(None);
     }
 
     println!("exiting cleanly");
