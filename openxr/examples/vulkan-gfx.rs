@@ -576,7 +576,7 @@ fn main() {
         swapchain.handle.wait_image(xr::Duration::INFINITE).unwrap();
 
         let cmd = &mut cmds[frame];
-        let fence = &mut fences[image_index as usize];
+        let fence = &mut fences[frame as usize];
         let buffer = &swapchain.buffers[image_index as usize];
         unsafe {
             // Ensure the last use of this frame's resources is 100% done
