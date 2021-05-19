@@ -1,24 +1,20 @@
-use std::{marker::PhantomData, ptr};
+use std::ptr;
 
 use crate::Instance;
-use gfx_hal::{
-    device::{Device, RawDevice},
-    prelude::QueueFamily,
-    queue, Backend, Instance as HalInstance, RawInstance,
-};
+use ash::{version::InstanceV1_0, vk::Handle};
+use gfx_backend_vulkan::{Device, Instance as GfxVulkanInstance};
+use gfx_hal::queue::QueueFamilyId;
 use sys::platform::*;
 
 use crate::*;
 
 /// The GFX graphics API, that wraps underlying Vulkan / OpenGL API
-pub struct Gfx<B: Backend> {
-    _phantom: PhantomData<B>,
-}
+pub struct Gfx;
 
-impl<B: Backend> Graphics for Gfx<B> {
+impl Graphics for Gfx {
     type Requirements = Requirements;
     type Format = VkFormat;
-    type SessionCreateInfo = SessionCreateInfo<B>;
+    type SessionCreateInfo = SessionCreateInfo;
     type SwapchainImage = VkImage;
 
     fn raise_format(x: i64) -> Self::Format {
@@ -52,9 +48,9 @@ impl<B: Backend> Graphics for Gfx<B> {
         let binding = sys::GraphicsBindingVulkanKHR {
             ty: sys::GraphicsBindingVulkanKHR::TYPE,
             next: ptr::null(),
-            instance: info.instance.as_raw().as_ptr(),
-            physical_device: info.physical_device,
-            device: info.device.as_ptr(),
+            instance: info.instance as *const _,
+            physical_device: info.physical_device as *const _,
+            device: info.device as *const _,
             queue_family_index: info.queue_family.0 as u32,
             queue_index: info.queue_id,
         };
@@ -101,11 +97,10 @@ pub struct Requirements {
     pub max_api_version_supported: Version,
 }
 
-#[derive(Clone)]
-pub struct SessionCreateInfo<B: Backend> {
-    pub instance: B::Instance,
-    pub physical_device: VkPhysicalDevice,
-    pub device: B::RawDevice,
-    pub queue_family: queue::QueueFamilyId,
+pub struct SessionCreateInfo {
+    pub instance: u64,
+    pub physical_device: u64,
+    pub device: u64,
+    pub queue_family: QueueFamilyId,
     pub queue_id: u32,
 }

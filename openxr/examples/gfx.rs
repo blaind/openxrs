@@ -6,15 +6,19 @@
 //! largely decouple its Vulkan and OpenXR components and handle errors gracefully.
 
 use std::{
+    ffi::CStr,
     io::Cursor,
     iter,
-    sync::{atomic, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
 use ash::{
     util::read_spv,
-    version::EntryV1_0,
+    version::{EntryV1_0, InstanceV1_0},
     vk::{self, Handle},
 };
 
@@ -22,19 +26,25 @@ use libc::c_void;
 use openxr as xr;
 
 use gfx_backend_vulkan as back;
-use gfx_hal::{command, device, format, image, memory, pass, pool, prelude::*, pso, RawInstance};
+use gfx_hal::{
+    command,
+    device::{self, Device as HalDevice},
+    format, image, memory, pass, pool,
+    prelude::*,
+    prelude::{PhysicalDevice, QueueFamily},
+    pso, Instance as HalInstance,
+};
 
 #[allow(clippy::field_reassign_with_default)] // False positive, might be fixed 1.51
 fn main() {
     // Handle interrupts gracefully
-    let running = Arc::new(atomic::AtomicBool::new(true));
+    let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
     ctrlc::set_handler(move || {
-        r.store(false, atomic::Ordering::Relaxed);
+        r.store(false, Ordering::Relaxed);
     })
     .expect("setting Ctrl-C handler");
 
-    println!("-> ENTRY");
     #[cfg(feature = "static")]
     let entry = xr::Entry::linked();
     #[cfg(not(feature = "static"))]
@@ -56,7 +66,6 @@ fn main() {
     // Initialize OpenXR with the extensions we've found!
     let mut enabled_extensions = xr::ExtensionSet::default();
     enabled_extensions.khr_vulkan_enable2 = true;
-    println!("-> INSTANCE");
     let xr_instance = entry
         .create_instance(
             &xr::ApplicationInfo {
@@ -106,52 +115,52 @@ fn main() {
     }
 
     let vk_entry = unsafe { ash::Entry::new().unwrap() };
-    let app_info = vk::ApplicationInfo::builder()
+
+    let vk_app_info = vk::ApplicationInfo::builder()
         .application_version(0)
         .engine_version(0)
         .api_version(vk_target_version);
 
-    println!("-> VK_INSTANCE");
-    let gfx_instance = if true {
-        // APPROACH NO. 2 -- most probably need to use this as per openxr docs
-        let vk_instance = unsafe {
-            xr_instance.create_vulkan_instance(
+    // FIXME add required extensions here
+    let extensions =
+        back::Instance::required_extensions(&vk_entry, vk_target_version.into()).unwrap();
+    let extensions_ptrs = extensions.iter().map(|&s| s.as_ptr()).collect::<Vec<_>>();
+
+    let layers = back::Instance::required_layers(&vk_entry).unwrap();
+    let layers_ptrs = layers.iter().map(|&s| s.as_ptr()).collect::<Vec<_>>();
+
+    let vk_instance = unsafe {
+        let vk_instance = xr_instance
+            .create_vulkan_instance(
                 system,
                 std::mem::transmute(vk_entry.static_fn().get_instance_proc_addr),
-                &vk::InstanceCreateInfo::builder().application_info(&app_info) as *const _
-                    as *const _,
+                &vk::InstanceCreateInfo::builder()
+                    .application_info(&vk_app_info)
+                    .enabled_extension_names(&extensions_ptrs)
+                    .enabled_layer_names(&layers_ptrs) as *const _ as *const _,
             )
-        }
-        .expect("XR error creating Vulkan instance")
-        .map_err(vk::Result::from_raw)
-        .expect("Vulkan error creating Vulkan instance");
-
-        let vk_instance = unsafe {
-            ash::Instance::load(
-                vk_entry.static_fn(),
-                vk::Instance::from_raw(vk_instance as _),
-            )
-        };
-
-        let gfx_instance = back::Instance::from_raw(vk_instance).unwrap();
-        gfx_instance
-    } else {
-        // APPROACH NO. 1
-        back::Instance::create("openxrs example", 1).unwrap()
+            .expect("XR error creating Vulkan instance")
+            .map_err(vk::Result::from_raw)
+            .expect("Vulkan error creating Vulkan instance");
+        ash::Instance::load(
+            vk_entry.static_fn(),
+            vk::Instance::from_raw(vk_instance as _),
+        )
     };
+
+    let gfx_instance = unsafe {
+        back::Instance::from_raw(vk_entry, vk_instance, vk_target_version.into(), extensions)
+    }
+    .unwrap();
 
     let gfx_adapters = gfx_instance.enumerate_adapters();
     let FIXME_gfx_adapter = gfx_adapters.first().unwrap();
     let gfx_physical_device = &FIXME_gfx_adapter.physical_device;
 
-    println!("-> VK_PHYSICAL_DEVICE {:p}", unsafe {
-        gfx_instance.as_raw().as_ptr()
-    },);
-
     //// FIXME <--- gfx_adapter instead of vk_physical_device !
     let vk_physical_device = vk::PhysicalDevice::from_raw(
         xr_instance
-            .vulkan_graphics_device(system, unsafe { gfx_instance.as_raw().as_ptr() } as _)
+            .vulkan_graphics_device(system, unsafe { gfx_instance.raw().handle().as_raw() } as _)
             //.vulkan_graphics_device(system, vk_instance.handle().as_raw() as _)
             .unwrap() as _,
     );
@@ -185,13 +194,13 @@ fn main() {
     let mut gfx_requested_features = gfx_hal::Features::empty();
     gfx_requested_features.insert(gfx_hal::Features::MULTI_VIEWPORTS); // <-- TODO: is this multiview?
 
-    let mut gfx_gpu = unsafe {
+    let mut gpu = unsafe {
         gfx_physical_device
             .open(&[(gfx_queue_family, &[1.0])], gfx_requested_features)
             .unwrap()
     };
 
-    let gfx_device = &mut gfx_gpu.device;
+    let gfx_device = &mut gpu.device;
 
     //     let vk_device = xr_instance
     //         .create_vulkan_device(
@@ -214,7 +223,7 @@ fn main() {
     //     let vk_device =
     //         ash::Device::load(vk_instance.fp_v1_0(), vk::Device::from_raw(vk_device as _));
 
-    let (gfx_queue_id, gfx_queue) = gfx_gpu
+    let (gfx_queue_id, gfx_queue) = gpu
         .queue_groups
         .iter_mut()
         .enumerate()
@@ -226,6 +235,7 @@ fn main() {
             }
         })
         .unwrap();
+
     // FIXME: get queue by queue family index
     //     let queue = vk_device.get_device_queue(queue_family_index, 0);
 
@@ -454,13 +464,13 @@ fn main() {
     // A session represents this application's desire to display things! This is where we hook
     // up our graphics API. This does not start the session; for that, you'll need a call to
     // Session::begin, which we do in 'main_loop below.
-    let (xr_session, mut xr_frame_wait, mut xr_frame_stream) = unsafe {
-        xr_instance.create_session::<xr::Gfx<back::Backend>>(
+    let (session, mut frame_wait, mut frame_stream) = unsafe {
+        xr_instance.create_session::<xr::Gfx>(
             system,
             &xr::gfx::SessionCreateInfo {
-                instance: gfx_instance,
+                instance: gfx_instance.raw().handle().as_raw(),
                 physical_device: vk_physical_device.as_raw() as _,
-                device: gfx_device.as_raw(),
+                device: gfx_device.raw().handle().as_raw(),
                 queue_family: gfx_queue_family.id(),
                 queue_id: gfx_queue_id as u32, // 0
             },
@@ -506,36 +516,23 @@ fn main() {
         .unwrap();
 
     // Attach the action set to the session
-    xr_session.attach_action_sets(&[&action_set]).unwrap();
+    session.attach_action_sets(&[&action_set]).unwrap();
 
     // Create an action space for each device we want to locate
     let right_space = right_action
-        .create_space(xr_session.clone(), xr::Path::NULL, xr::Posef::IDENTITY)
+        .create_space(session.clone(), xr::Path::NULL, xr::Posef::IDENTITY)
         .unwrap();
     let left_space = left_action
-        .create_space(xr_session.clone(), xr::Path::NULL, xr::Posef::IDENTITY)
+        .create_space(session.clone(), xr::Path::NULL, xr::Posef::IDENTITY)
         .unwrap();
 
     // OpenXR uses a couple different types of reference frames for positioning content; we need
     // to choose one for displaying our content! STAGE would be relative to the center of your
     // guardian system's bounds, and LOCAL would be relative to your device's starting location.
-    let stage = xr_session
+    let stage = session
         .create_reference_space(xr::ReferenceSpaceType::STAGE, xr::Posef::IDENTITY)
         .unwrap();
 
-    //     let cmd_pool = vk_device
-    //         .create_command_pool(
-    //             &vk::CommandPoolCreateInfo::builder()
-    //                 .queue_family_index(queue_family_index)
-    //                 .flags(
-    //                     vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER
-    //                         | vk::CommandPoolCreateFlags::TRANSIENT,
-    //                 ),
-    //             None,
-    //         )
-    //         .unwrap();
-
-    println!("-> COMMAND_POOL");
     let mut cmd_pool = unsafe {
         gfx_device.create_command_pool(
             gfx_queue_family.id(),
@@ -581,12 +578,12 @@ fn main() {
     let mut frame = 0;
     println!("-> LOOP");
     'main_loop: loop {
-        if !running.load(atomic::Ordering::Relaxed) {
+        if !running.load(Ordering::Relaxed) {
             println!("requesting exit");
             // The OpenXR runtime may want to perform a smooth transition between scenes, so we
             // can't necessarily exit instantly. Instead, we must notify the runtime of our
             // intent and wait for it to tell us when we're actually done.
-            match xr_session.request_exit() {
+            match session.request_exit() {
                 Ok(()) => {}
                 Err(xr::sys::Result::ERROR_SESSION_NOT_RUNNING) => break,
                 Err(e) => panic!("{}", e),
@@ -602,11 +599,11 @@ fn main() {
                     println!("entered state {:?}", e.state());
                     match e.state() {
                         xr::SessionState::READY => {
-                            xr_session.begin(VIEW_TYPE).unwrap();
+                            session.begin(VIEW_TYPE).unwrap();
                             session_running = true;
                         }
                         xr::SessionState::STOPPING => {
-                            xr_session.end().unwrap();
+                            session.end().unwrap();
                             session_running = false;
                         }
                         xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => {
@@ -634,12 +631,12 @@ fn main() {
         // Block until the previous frame is finished displaying, and is ready for another one.
         // Also returns a prediction of when the next frame will be displayed, for use with
         // predicting locations of controllers, viewpoints, etc.
-        let xr_frame_state = xr_frame_wait.wait().unwrap();
+        let xr_frame_state = frame_wait.wait().unwrap();
         // Must be called before any rendering is done!
-        xr_frame_stream.begin().unwrap();
+        frame_stream.begin().unwrap();
 
         if !xr_frame_state.should_render {
-            xr_frame_stream
+            frame_stream
                 .end(
                     xr_frame_state.predicted_display_time,
                     environment_blend_mode,
@@ -673,7 +670,7 @@ fn main() {
             let format = vk::Format::from_raw(COLOR_FORMAT as i32);
             assert_eq!(format, vk::Format::B8G8R8A8_SRGB);
 
-            let handle = xr_session
+            let handle = session
                 .create_swapchain(&xr::SwapchainCreateInfo {
                     create_flags: xr::SwapchainCreateFlags::EMPTY,
                     usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT
@@ -700,7 +697,7 @@ fn main() {
                 buffers: images
                     .into_iter()
                     .map(|color_image| {
-                        let image = back::Image::from_raw(
+                        let image = back::native::Image::from_raw(
                             vk::Image::from_raw(color_image).as_raw() as *const c_void,
                             image::Kind::D2(resolution.width, resolution.height, 2, 0), // FIXME msaa samples =2 ?
                             image::ViewCapabilities::KIND_2D_ARRAY,                     // FIXME ?
@@ -869,7 +866,7 @@ fn main() {
         unsafe { cmd.finish() };
         // vk_device.end_command_buffer(cmd).unwrap();
 
-        xr_session.sync_actions(&[(&action_set).into()]).unwrap();
+        session.sync_actions(&[(&action_set).into()]).unwrap();
 
         // Find where our controllers are located in the Stage space
         let right_location = right_space
@@ -880,7 +877,7 @@ fn main() {
             .locate(&stage, xr_frame_state.predicted_display_time)
             .unwrap();
 
-        if left_action.is_active(&xr_session, xr::Path::NULL).unwrap() {
+        if left_action.is_active(&session, xr::Path::NULL).unwrap() {
             print!(
                 "Left Hand: ({:0<12},{:0<12},{:0<12}), ",
                 left_location.pose.position.x,
@@ -889,7 +886,7 @@ fn main() {
             );
         }
 
-        if right_action.is_active(&xr_session, xr::Path::NULL).unwrap() {
+        if right_action.is_active(&session, xr::Path::NULL).unwrap() {
             print!(
                 "Right Hand: ({:0<12},{:0<12},{:0<12})",
                 right_location.pose.position.x,
@@ -904,7 +901,7 @@ fn main() {
         // rendering begins in earnest on the GPU. Uniforms dependent on this data can be sent
         // to the GPU just-in-time by writing them to per-frame host-visible memory which the
         // GPU will only read once the command buffer is submitted.
-        let (_, views) = xr_session
+        let (_, views) = session
             .locate_views(VIEW_TYPE, xr_frame_state.predicted_display_time, &stage)
             .unwrap();
 
@@ -927,7 +924,7 @@ fn main() {
             },
         };
 
-        xr_frame_stream
+        frame_stream
             .end(
                 xr_frame_state.predicted_display_time,
                 environment_blend_mode,
@@ -955,16 +952,15 @@ fn main() {
                 ],
             )
             .unwrap();
-
         frame = (frame + 1) % PIPELINE_DEPTH as usize;
     }
 
     // OpenXR MUST be allowed to clean up before we destroy Vulkan resources it could touch, so
     // first we must drop all its handles.
     drop((
-        xr_session,
-        xr_frame_wait,
-        xr_frame_stream,
+        session,
+        frame_wait,
+        frame_stream,
         stage,
         action_set,
         left_space,
@@ -1008,17 +1004,17 @@ pub const COLOR_FORMAT: format::Format = format::Format::Bgra8Srgb;
 pub const VIEW_COUNT: u32 = 2;
 const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 
-struct Swapchain<B: gfx_hal::Backend> {
-    handle: xr::Swapchain<xr::Gfx<B>>,
-    buffers: Vec<Framebuffer<B>>,
+struct Swapchain {
+    handle: xr::Swapchain<xr::Gfx>,
+    buffers: Vec<Framebuffer>,
     resolution: vk::Extent2D,
 }
 
-struct Framebuffer<B: gfx_hal::Backend> {
-    framebuffer: B::Framebuffer,
-    image: B::Image,
-    image_view: B::ImageView,
+struct Framebuffer {
+    framebuffer: back::native::Framebuffer,
+    image_view: back::native::ImageView,
+    image: back::native::Image,
 }
 
 /// Maximum number of frames in flight
-const PIPELINE_DEPTH: u32 = 2;
+const PIPELINE_DEPTH: usize = 2;

@@ -24,12 +24,12 @@ default = ["loaded"]
 sys = { package = "openxr-sys", path = "../sys", version = "0.8.5" }
 libc = "0.2.50"
 libloading = { version = "0.7", optional = true }
-gfx-hal = "0.8.0"
+gfx-hal = "0.8"
+gfx-backend-vulkan = "0.8"
+ash = "0.32" # keep in sync with gfx_hal/*_backend ash
 
 [dev-dependencies]
-ash = "0.32" # keep in sync with gfx_hal/*_backend ash
 ctrlc = "3.1.5"
-gfx-backend-vulkan = "0.8.0"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["profileapi"] }

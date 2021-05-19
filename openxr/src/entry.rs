@@ -1,3 +1,4 @@
+use ash::vk;
 #[cfg(feature = "loaded")]
 use libloading::Library;
 use std::{
