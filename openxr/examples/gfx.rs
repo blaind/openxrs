@@ -315,151 +315,111 @@ fn main() {
     ))
     .unwrap();
 
-    let gfx_vert = unsafe { gfx_device.create_shader_module(&vert) }.unwrap();
-    let gfx_frag = unsafe { gfx_device.create_shader_module(&frag) }.unwrap();
+    let render_pass = unsafe {
+        gfx_device
+            .create_render_pass(
+                iter::once(pass::Attachment {
+                    format: Some(COLOR_FORMAT),
+                    samples: 1,
+                    ops: pass::AttachmentOps::new(
+                        pass::AttachmentLoadOp::Clear,
+                        pass::AttachmentStoreOp::Store,
+                    ),
+                    stencil_ops: pass::AttachmentOps::DONT_CARE,
+                    layouts: image::Layout::Undefined..image::Layout::ColorAttachmentOptimal,
+                }),
+                // Note: gfx-hal supports only GRAPHICS bind point
+                iter::once(pass::SubpassDesc {
+                    colors: &[(0, image::Layout::ColorAttachmentOptimal)],
+                    depth_stencil: None,
+                    inputs: &[],
+                    resolves: &[],
+                    preserves: &[],
+                }),
+                iter::once(pass::SubpassDependency {
+                    passes: None..Some(0), // None is SUBPASS_EXTERNAL
+                    stages: pso::PipelineStage::COLOR_ATTACHMENT_OUTPUT
+                        ..pso::PipelineStage::COLOR_ATTACHMENT_OUTPUT,
+                    accesses: image::Access::empty()..image::Access::COLOR_ATTACHMENT_WRITE,
+                    flags: memory::Dependencies::empty(),
+                }),
+            ) // specify multiview when supported
+            .unwrap()
+    };
 
-    let gfx_pipeline_layout =
-        unsafe { gfx_device.create_pipeline_layout(iter::empty(), iter::empty()) }.unwrap();
+    let vert = unsafe { gfx_device.create_shader_module(&vert) }.unwrap();
+    let frag = unsafe { gfx_device.create_shader_module(&frag) }.unwrap();
 
-    // FIXME: seems like this is part of GraphicsPipelineInfoBuf
-    // let noop_stencil_state = back::conv::map_stencil_side(StencilFace::default());
+    let pipeline_layout = unsafe {
+        gfx_device
+            .create_pipeline_layout(iter::empty(), iter::empty())
+            .unwrap()
+    };
 
-    //     let noop_stencil_state = vk::StencilOpState {
-    //         fail_op: vk::StencilOp::KEEP,
-    //         pass_op: vk::StencilOp::KEEP,
-    //         depth_fail_op: vk::StencilOp::KEEP,
-    //         compare_op: vk::CompareOp::ALWAYS,
-    //         compare_mask: 0,
-    //         write_mask: 0,
-    //         reference: 0,
-    //     };
+    let pipeline = unsafe {
+        gfx_device
+            .create_graphics_pipeline(
+                &pso::GraphicsPipelineDesc {
+                    primitive_assembler: pso::PrimitiveAssemblerDesc::Vertex {
+                        buffers: &[],
+                        attributes: &[],
+                        input_assembler: pso::InputAssemblerDesc {
+                            primitive: pso::Primitive::TriangleList,
+                            with_adjacency: false,
+                            restart_index: None,
+                        },
+                        vertex: pso::EntryPoint {
+                            entry: "main",
+                            module: &vert,
+                            specialization: pso::Specialization::EMPTY,
+                        },
+                        tessellation: None,
+                        geometry: None,
+                    },
+                    fragment: Some(pso::EntryPoint {
+                        entry: "main",
+                        module: &frag,
+                        specialization: pso::Specialization::EMPTY,
+                    }),
+                    // viewport_state -> gfx-hal always has 1 viewport and 1 scissor
+                    rasterizer: pso::Rasterizer::FILL,
+                    multisampling: None,
+                    depth_stencil: pso::DepthStencilDesc {
+                        depth: None,
+                        depth_bounds: false,
+                        stencil: None,
+                    },
+                    blender: pso::BlendDesc {
+                        logic_op: None,
+                        targets: vec![pso::ColorBlendDesc {
+                            mask: pso::ColorMask::COLOR,
+                            blend: Some(pso::BlendState::ADD),
+                        }],
+                    },
+                    // Note: opposite of dynamic_state
+                    baked_states: pso::BakedStates {
+                        viewport: None,
+                        scissor: None,
+                        blend_constants: None,
+                        depth_bounds: None,
+                    },
+                    layout: &pipeline_layout,
+                    subpass: pass::Subpass {
+                        index: 0,
+                        main_pass: &render_pass,
+                    },
+                    // Other:
+                    label: None,
+                    flags: pso::PipelineCreationFlags::empty(),
+                    parent: pso::BasePipeline::None,
+                },
+                None,
+            )
+            .unwrap()
+    };
 
-    let buffers = vec![];
-    let attributes = vec![];
-
-    let mut graphics_pipeline_desc = pso::GraphicsPipelineDesc::new(
-        pso::PrimitiveAssemblerDesc::Vertex {
-            buffers: &buffers,
-            attributes: &attributes,
-            input_assembler: pso::InputAssemblerDesc {
-                primitive: pso::Primitive::TriangleList,
-                with_adjacency: false,
-                restart_index: None,
-            },
-            vertex: pso::EntryPoint {
-                entry: "main",
-                module: &gfx_vert,
-                specialization: Default::default(),
-            },
-            geometry: None,
-            tessellation: None,
-        },
-        pso::Rasterizer::FILL,
-        Some(pso::EntryPoint {
-            entry: "main",
-            module: &gfx_frag,
-            specialization: Default::default(),
-        }),
-        &gfx_pipeline_layout,
-        pass::Subpass {
-            index: 0,
-            main_pass: &gfx_render_pass,
-        },
-    );
-
-    graphics_pipeline_desc
-        .blender
-        .targets
-        .push(pso::ColorBlendDesc {
-            mask: pso::ColorMask::RED | pso::ColorMask::BLUE | pso::ColorMask::GREEN,
-            blend: Some(pso::BlendState::ADD),
-        });
-
-    println!("-> PIPELINE");
-    let gfx_pipeline = unsafe {
-        gfx_device.create_graphics_pipeline(
-            // FIXME: viewport_state ? rasterization_state ? multisample_state? depth_stencil?
-            &graphics_pipeline_desc,
-            None,
-        )
-    }
-    .unwrap();
-
-    //     let pipeline = vk_device
-    //         .create_graphics_pipelines(
-    //             vk::PipelineCache::null(),
-    //             &[vk::GraphicsPipelineCreateInfo::builder()
-    //                 .stages(&[
-    //                     vk::PipelineShaderStageCreateInfo {
-    //                         stage: vk::ShaderStageFlags::VERTEX,
-    //                         module: vert,
-    //                         p_name: b"main\0".as_ptr() as _,
-    //                         ..Default::default()
-    //                     },
-    //                     vk::PipelineShaderStageCreateInfo {
-    //                         stage: vk::ShaderStageFlags::FRAGMENT,
-    //                         module: frag,
-    //                         p_name: b"main\0".as_ptr() as _,
-    //                         ..Default::default()
-    //                     },
-    //                 ])
-    //                 .vertex_input_state(&vk::PipelineVertexInputStateCreateInfo::default())
-    //                 .input_assembly_state(
-    //                     &vk::PipelineInputAssemblyStateCreateInfo::builder()
-    //                         .topology(vk::PrimitiveTopology::TRIANGLE_LIST),
-    //                 )
-    //                 .viewport_state(
-    //                     &vk::PipelineViewportStateCreateInfo::builder()
-    //                         .scissor_count(1)
-    //                         .viewport_count(1),
-    //                 )
-    //                 .rasterization_state(
-    //                     &vk::PipelineRasterizationStateCreateInfo::builder()
-    //                         .cull_mode(vk::CullModeFlags::NONE)
-    //                         .polygon_mode(vk::PolygonMode::FILL)
-    //                         .line_width(1.0),
-    //                 )
-    //                 .multisample_state(
-    //                     &vk::PipelineMultisampleStateCreateInfo::builder()
-    //                         .rasterization_samples(vk::SampleCountFlags::TYPE_1),
-    //                 )
-    //                 .depth_stencil_state(
-    //                     &vk::PipelineDepthStencilStateCreateInfo::builder()
-    //                         .depth_test_enable(false)
-    //                         .depth_write_enable(false)
-    //                         .front(noop_stencil_state)
-    //                         .back(noop_stencil_state),
-    //                 )
-    //                 .color_blend_state(
-    //                     &vk::PipelineColorBlendStateCreateInfo::builder().attachments(&[
-    //                         vk::PipelineColorBlendAttachmentState {
-    //                             blend_enable: vk::TRUE,
-    //                             src_color_blend_factor: vk::BlendFactor::ONE,
-    //                             dst_color_blend_factor: vk::BlendFactor::ZERO,
-    //                             color_blend_op: vk::BlendOp::ADD,
-    //                             color_write_mask: vk::ColorComponentFlags::R
-    //                                 | vk::ColorComponentFlags::G
-    //                                 | vk::ColorComponentFlags::B,
-    //                             ..Default::default()
-    //                         },
-    //                     ]),
-    //                 )
-    //                 .dynamic_state(
-    //                     &vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&[
-    //                         vk::DynamicState::VIEWPORT,
-    //                         vk::DynamicState::SCISSOR,
-    //                     ]),
-    //                 )
-    //                 .layout(pipeline_layout)
-    //                 .render_pass(render_pass)
-    //                 .subpass(0)
-    //                 .build()],
-    //             None,
-    //         )
-    //         .unwrap()[0];
-
-    unsafe { gfx_device.destroy_shader_module(gfx_vert) };
-    unsafe { gfx_device.destroy_shader_module(gfx_frag) };
+    unsafe { gfx_device.destroy_shader_module(vert) };
+    unsafe { gfx_device.destroy_shader_module(frag) };
 
     // A session represents this application's desire to display things! This is where we hook
     // up our graphics API. This does not start the session; for that, you'll need a call to
@@ -858,7 +818,7 @@ fn main() {
         // Draw the scene. Multiview means we only need to do this once, and the GPU will
         // automatically broadcast operations to all views. Shaders can use `gl_ViewIndex` to
         // e.g. select the correct view matrix.
-        unsafe { cmd.bind_graphics_pipeline(&gfx_pipeline) };
+        unsafe { cmd.bind_graphics_pipeline(&pipeline) };
         unsafe { cmd.draw(0..3, 0..1) };
         // vk_device.cmd_draw(cmd, 3, 1, 0, 0);
         unsafe { cmd.end_render_pass() };
@@ -987,7 +947,7 @@ fn main() {
     unsafe {
         // FIXME
         // vk_device.destroy_pipeline(pipeline, None);
-        gfx_device.destroy_pipeline_layout(gfx_pipeline_layout);
+        gfx_device.destroy_pipeline_layout(pipeline_layout);
         gfx_device.destroy_command_pool(cmd_pool);
         gfx_device.destroy_render_pass(gfx_render_pass);
         // vk_device.destroy_device(None);
