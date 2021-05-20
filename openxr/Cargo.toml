@@ -28,13 +28,17 @@ libloading = { version = "0.7", optional = true }
 [dev-dependencies]
 ash = "0.32"
 ctrlc = "3.1.5"
-gfx-hal = { path = "../../gfx/src/hal" }
-gfx-backend-vulkan = { path = "../../gfx/src/backend/vulkan" }
+gfx-hal = "0.8"
+gfx-backend-vulkan = "0.8"
 gfx-auxil = "0.9.0"
 drop_guard = "0.2.1"
+wgpu-core = { path = "../../wgpu/wgpu-core" }
+wgpu-types = { path = "../../wgpu/wgpu-types" }
+env_logger = "0.8.3"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["profileapi"] }
 
 [package.metadata.docs.rs]
 features = ["linked", "loaded", "mint"]
+
