@@ -15,11 +15,16 @@ use ash::{
 use gfx_backend_vulkan as back;
 use gfx_hal::{command, device, format, image, memory, pass, pool, prelude::*, pso};
 use openxr as xr;
+use wgc::{
+    instance::{RawAdapter, RawInstance},
+    pipeline::ShaderModuleDescriptor,
+};
 use wgpu_core::instance::Instance;
 use wgpu_types::BackendBit;
 
 use wgpu_core as wgc;
 use wgpu_types as wgt;
+use wgt::ShaderFlags;
 
 fn main() {
     env_logger::init();
@@ -136,21 +141,14 @@ fn main() {
     let vk_instance =
         drop_guard::DropGuard::new(vk_instance, |inst| unsafe { inst.destroy_instance(None) });
 
-    let vk_physical_device = vk::PhysicalDevice::from_raw(
-        xr_instance
-            .vulkan_graphics_device(system, vk_instance.handle().as_raw() as _)
-            .unwrap() as _,
-    );
-
-    let wgpu_instance = unsafe {
-        wgc::hub::Global::vulkan_from_raw(
-            "openxr",
-            IdentityPassThroughFactory,
-            vk_target_version.into(), // FIXME ?
+    let gfx_instance = unsafe {
+        back::Instance::from_raw(
             vk_entry.clone(),
             vk_instance.clone(),
+            vk_target_version.into(),
             extensions,
         )
+        .unwrap()
     };
 
     let vk_physical_device = vk::PhysicalDevice::from_raw(
@@ -159,21 +157,7 @@ fn main() {
             .unwrap() as _,
     );
 
-    let wgpu_adapter = unsafe {
-        wgpu_instance.request_raw_vulkan_adapter(
-            // FIXME move input set into method?
-            wgc::instance::AdapterInputs::IdSet(
-                &[wgc::id::TypedId::zip(0, 0, wgt::Backend::Vulkan)],
-                |id| id.backend(),
-            ),
-            vk_physical_device.clone(),
-        )
-    }
-    .unwrap();
-
-    let supported_features =
-        wgc::gfx_select!(wgpu_adapter => wgpu_instance.adapter_features(wgpu_adapter)).unwrap();
-    println!("Features {:?}", supported_features);
+    let gfx_adapter = unsafe { gfx_instance.adapter_from_raw(vk_physical_device) };
 
     unsafe {
         let vk_device_properties = vk_instance.get_physical_device_properties(vk_physical_device);
@@ -183,8 +167,11 @@ fn main() {
         }
     }
 
-    // FIXME
-    let queue_family = 0; // wgc::gfx_select!(wgpu_adapter => wgpu_instance.TODO_REMOVE_return_graphics_queue_family(wgpu_adapter));
+    let queue_family = gfx_adapter
+        .queue_families
+        .iter()
+        .find(|family| family.queue_type().supports_graphics())
+        .expect("Vulkan device has no graphics queue");
 
     let vk_device = unsafe {
         let vk_device = xr_instance
@@ -194,7 +181,7 @@ fn main() {
                 vk_physical_device.as_raw() as _,
                 &vk::DeviceCreateInfo::builder().queue_create_infos(&[
                     vk::DeviceQueueCreateInfo::builder()
-                        .queue_family_index(queue_family as _) //.id().0 as _) <-- FIXME
+                        .queue_family_index(queue_family.id().0 as _)
                         .queue_priorities(&[1.0])
                         .build(),
                 ]) as *const _ as *const _,
@@ -204,14 +191,53 @@ fn main() {
             .expect("Vulkan error creating Vulkan device");
         ash::Device::load(vk_instance.fp_v1_0(), vk::Device::from_raw(vk_device as _))
     };
-
     let vk_device =
         drop_guard::DropGuard::new(vk_device, |dev| unsafe { dev.destroy_device(None) });
 
-    // FIXME: use openxr device instead...
-    let device = wgc::id::TypedId::zip(0, 0, wgt::Backend::Vulkan);
-    let (device, error) = unsafe {
-        wgc::gfx_select!(wgpu_adapter => wgpu_instance.adapter_request_raw_vulkan_device(
+    // the arguments should mirror the ones for the creation of vk_device
+    let mut gpu = unsafe {
+        gfx_adapter
+            .physical_device
+            .gpu_from_raw(
+                vk_device.clone(),
+                &[(queue_family, &[1.0])],
+                gfx_hal::Features::empty(), // add multiview when supported
+            )
+            .unwrap()
+    };
+
+    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    let wgpu_instance = unsafe {
+        wgc::hub::Global::from_raw(
+            "openxr",
+            IdentityPassThroughFactory,
+            RawInstance::Vulkan(gfx_instance),
+        )
+    };
+
+    let wgpu_adapter = unsafe {
+        wgpu_instance.add_raw_adapter(
+            // FIXME move input set into method?
+            wgc::instance::AdapterInputs::IdSet(
+                &[wgc::id::TypedId::zip(0, 0, wgt::Backend::Vulkan)],
+                |id| id.backend(),
+            ),
+            RawAdapter::Vulkan(gfx_adapter),
+        )
+    }
+    .unwrap();
+
+    let supported_features =
+        wgc::gfx_select!(wgpu_adapter => wgpu_instance.adapter_features(wgpu_adapter)).unwrap();
+
+    println!("Features {:?}", supported_features);
+
+    //let queue = &mut gpu.queue_groups.pop().unwrap().queues[0];
+
+    println!("BACKEND: {:?}", wgpu_adapter.backend());
+
+    let (wgpu_device, error) = unsafe {
+        wgpu_instance.adapter_request_raw_device(
             wgpu_adapter,
             &wgt::DeviceDescriptor {
                 label: None,
@@ -219,11 +245,47 @@ fn main() {
                 limits: wgt::Limits::default(),
             },
             None,
-            device
-        ))
+            wgc::id::TypedId::zip(0, 0, wgt::Backend::Vulkan),
+            gpu,
+        )
     };
 
-    println!("DEVICE: {:?}", device);
+    println!("DEVICE: {:?}", wgpu_device);
+
+    let vert =
+        gfx_auxil::read_spirv(Cursor::new(&include_bytes!("fullscreen.vert.spv")[..])).unwrap();
+    let frag = gfx_auxil::read_spirv(Cursor::new(
+        &include_bytes!("debug_pattern_single_view.frag.spv")[..],
+    ))
+    .unwrap();
+    //let vert = unsafe { gpu.device.create_shader_module(&vert).unwrap() };
+    //let frag = unsafe { gpu.device.create_shader_module(&frag).unwrap() };
+
+    let desc = ShaderModuleDescriptor {
+        label: None,
+        flags: ShaderFlags::empty(), // VALIDATION ?
+    };
+
+    let (vert_shader_module_id, error) = wgpu_instance
+        .device_create_shader_module::<gfx_backend_vulkan::Backend>(
+            wgpu_device,
+            &desc,
+            wgc::pipeline::ShaderModuleSource::SpirV(Cow::from(vert)),
+            wgc::id::TypedId::zip(0, 0, wgt::Backend::Vulkan),
+        );
+
+    let (frag_shader_module_id, error) = wgpu_instance
+        .device_create_shader_module::<gfx_backend_vulkan::Backend>(
+            wgpu_device,
+            &desc,
+            wgc::pipeline::ShaderModuleSource::SpirV(Cow::from(frag)),
+            wgc::id::TypedId::zip(1, 0, wgt::Backend::Vulkan),
+        );
+
+    println!(
+        "VERT: {:?}, FRAG: {:?}",
+        vert_shader_module_id, frag_shader_module_id
+    );
 }
 
 pub const COLOR_FORMAT: format::Format = format::Format::Bgra8Srgb;
