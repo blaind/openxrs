@@ -34,7 +34,9 @@ gfx-auxil = "0.9.0"
 drop_guard = "0.2.1"
 wgpu-core = { path = "../../wgpu/wgpu-core" }
 wgpu-types = { path = "../../wgpu/wgpu-types" }
+wgpu = { path = "../../wgpu-rs" }
 env_logger = "0.8.3"
+pollster = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["profileapi"] }

@@ -212,6 +212,14 @@ async fn instantiate() {
             .unwrap()
     };
 
+    let xr_vulkan_session_create_info = xr::vulkan::SessionCreateInfo {
+        instance: vk_instance.handle().as_raw() as _,
+        physical_device: vk_physical_device.as_raw() as _,
+        device: vk_device.handle().as_raw() as _,
+        queue_family_index: queue_family.id().0 as _,
+        queue_index: 0,
+    };
+
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     let (instance, adapter, device, queue) = unsafe {
         let instance: wgpu::Instance = wgpu::Instance::from_raw(RawInstance::Vulkan(gfx_instance));
@@ -237,18 +245,19 @@ async fn instantiate() {
         (instance, adapter, device, queue)
     };
 
-    let vert =
-        gfx_auxil::read_spirv(Cursor::new(&include_bytes!("fullscreen.vert.spv")[..])).unwrap();
-    let frag = gfx_auxil::read_spirv(Cursor::new(
-        &include_bytes!("debug_pattern_single_view.frag.spv")[..],
-    ))
-    .unwrap();
-
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+    /*
     let vert = device.create_shader_module(&wgpu::include_spirv!("fullscreen.vert.spv"));
     let frag =
         device.create_shader_module(&wgpu::include_spirv!("debug_pattern_single_view.frag.spv"));
+        */
+
+    let shader = device.create_shader_module(&wgpu::ShaderModuleDescriptor {
+        label: None,
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("wgpu_rs.wgsl"))),
+        flags: wgpu::ShaderFlags::all(),
+    });
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
@@ -260,13 +269,13 @@ async fn instantiate() {
         label: None,
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
-            module: &vert,
-            entry_point: "main",
+            module: &shader,
+            entry_point: "vs_main",
             buffers: &[],
         },
         fragment: Some(wgpu::FragmentState {
-            module: &frag,
-            entry_point: "main",
+            module: &shader,
+            entry_point: "fs_main",
             targets: &[wgpu::ColorTargetState {
                 format,
                 blend: Some(wgpu::BlendState {
@@ -290,16 +299,7 @@ async fn instantiate() {
     // Session::begin, which we do in 'main_loop below.
     let (session, mut frame_wait, mut frame_stream) = unsafe {
         xr_instance
-            .create_session::<xr::Vulkan>(
-                system,
-                &xr::vulkan::SessionCreateInfo {
-                    instance: vk_instance.handle().as_raw() as _,
-                    physical_device: vk_physical_device.as_raw() as _,
-                    device: vk_device.handle().as_raw() as _,
-                    queue_family_index: queue_family.id().0 as _,
-                    queue_index: 0,
-                },
-            )
+            .create_session::<xr::Vulkan>(system, &xr_vulkan_session_create_info)
             .unwrap()
     };
 
@@ -433,6 +433,7 @@ async fn instantiate() {
                 .unwrap();
             continue;
         }
+        println!("PLOP");
 
         let swapchain = swapchain.get_or_insert_with(|| {
             // Now we need to find all the viewpoints we need to take care of! This is a
@@ -482,6 +483,13 @@ async fn instantiate() {
                     .into_iter()
                     .map(|color_image| {
                         let color_image = vk::Image::from_raw(color_image);
+
+                        //let image = device.create_texture_from_raw(desc);
+
+                        // FIXME: a) create raw image?
+                        // FIXME: b) access gpu.device through device?
+                        /*
+
                         let color = unsafe {
                             gpu.device
                                 .image_view_from_raw(
@@ -500,14 +508,65 @@ async fn instantiate() {
                                 )
                                 .unwrap()
                         };
+                        */
+
+                        let color = {
+                            let range = image::SubresourceRange {
+                                aspects: format::Aspects::COLOR,
+                                level_start: 0,
+                                level_count: Some(1),
+                                layer_start: 0,
+                                layer_count: Some(1),
+                            };
+                            let mut info = vk::ImageViewCreateInfo::builder()
+                                .flags(vk::ImageViewCreateFlags::empty())
+                                .image(color_image)
+                                .view_type(vk::ImageViewType::TYPE_2D_ARRAY)
+                                .format(back::conv::map_format(COLOR_FORMAT))
+                                .components(back::conv::map_swizzle(format::Swizzle::NO))
+                                .subresource_range(back::conv::map_subresource_range(&range));
+
+                            /*
+                            if self.shared.image_view_usage {
+                                image_view_info = vk::ImageViewUsageCreateInfo::builder()
+                                    .usage(conv::map_image_usage(usage))
+                                    .build();
+                                info = info.push_next(&mut image_view_info);
+                            }
+                            */
+
+                            let image =
+                                unsafe { vk_device.create_image_view(&info, None) }.unwrap();
+                            let color = back::native::ImageView {
+                                image: color_image,
+                                raw: image,
+                                range,
+                            };
+
+                            color
+                        };
 
                         let texture_view = device.create_texture_view_from_raw(
                             RawImageView::Vulkan(color),
+                            &wgpu::TextureDescriptor {
+                                mip_level_count: 1,
+                                sample_count: 1,
+                                dimension: wgpu::TextureDimension::D2,
+                                format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                                usage: wgpu::TextureUsage::RENDER_ATTACHMENT
+                                    | wgpu::TextureUsage::COPY_SRC,
+                                label: None,
+                                size: wgpu::Extent3d {
+                                    width: resolution.width as u32,
+                                    height: resolution.height as u32,
+                                    depth_or_array_layers: 1,
+                                },
+                            },
                             &wgpu::TextureViewDescriptor {
                                 label: None,
                                 format: None,
                                 dimension: Some(wgpu::TextureViewDimension::D2Array),
-                                aspect: wgpu::TextureAspect::StencilOnly,
+                                aspect: wgpu::TextureAspect::All,
                                 base_mip_level: 0,
                                 mip_level_count: None,
                                 base_array_layer: 0,

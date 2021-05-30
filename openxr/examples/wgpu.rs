@@ -16,7 +16,7 @@ use gfx_backend_vulkan as back;
 use gfx_hal::{command, device, format, image, memory, pass, pool, prelude::*, pso};
 use openxr as xr;
 use wgc::{
-    instance::{RawAdapter, RawInstance},
+    instance::{RawAdapter, RawGpu, RawInstance},
     pipeline::ShaderModuleDescriptor,
 };
 use wgpu_core::instance::Instance;
@@ -246,7 +246,7 @@ fn main() {
             },
             None,
             wgc::id::TypedId::zip(0, 0, wgt::Backend::Vulkan),
-            gpu,
+            RawGpu::Vulkan(gpu),
         )
     };
 
